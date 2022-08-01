@@ -1,1 +1,1 @@
-# infrastructure
+# Infrastructure as code
