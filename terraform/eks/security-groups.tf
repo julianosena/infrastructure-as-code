@@ -26,8 +26,9 @@ resource "aws_security_group" "node_group_two" {
       "192.168.0.0/16",
     ]
   }
+}
 
-  resource "aws_security_group" "node_group_three" {
+resource "aws_security_group" "node_group_three" {
   name_prefix = "node_group_three"
   vpc_id      = module.vpc.vpc_id
 
