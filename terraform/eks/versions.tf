@@ -1,0 +1,21 @@
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 4.15.0"
+    }
+
+    backend "s3" {
+      bucket = "iac-tlf-state"
+      key    = "iac-tlf-state"
+      region = "eu-west-1"
+    }
+
+    random = {
+      source  = "hashicorp/random"
+      version = "3.1.0"
+    }
+  }
+
+  required_version = "~> 1.2.0"
+}
