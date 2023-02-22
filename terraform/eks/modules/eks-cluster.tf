@@ -1,9 +1,9 @@
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
-  version = "~> 18.0"
+  version = "~> 19.0"
 
   cluster_name    = local.cluster_name
-  cluster_version = "1.22"
+  cluster_version = "1.24"
 
   vpc_id     = module.vpc.vpc_id
   subnet_ids = module.vpc.public_subnets
@@ -21,7 +21,7 @@ module "eks" {
     one = {
       name = "node-group-1"
 
-      instance_types = ["t3.medium"]
+      instance_types = ["t3.small"]
 
       min_size     = 1
       max_size     = 3
@@ -39,7 +39,7 @@ module "eks" {
     two = {
       name = "node-group-2"
 
-      instance_types = ["t3.medium"]
+      instance_types = ["t3.small"]
 
       min_size     = 1
       max_size     = 2
@@ -51,24 +51,6 @@ module "eks" {
 
       vpc_security_group_ids = [
         aws_security_group.node_group_two.id
-      ]
-    }
-
-    three = {
-      name = "node-group-3"
-
-      instance_types = ["t3.medium"]
-
-      min_size     = 1
-      max_size     = 2
-      desired_size = 1
-
-      pre_bootstrap_user_data = <<-EOT
-      echo 'foo bar'
-      EOT
-
-      vpc_security_group_ids = [
-        aws_security_group.node_group_three.id
       ]
     }
   }
