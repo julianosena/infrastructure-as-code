@@ -55,7 +55,7 @@ resource "helm_release" "pg_cluster" {
 
   set {
     name  = "auth.password"
-    value = "${var.db_password}"
+    value = "coder"
   }
 
   set {
@@ -80,7 +80,7 @@ resource "helm_release" "coder" {
 coder:
   env:
     - name: CODER_PG_CONNECTION_URL
-      value: "postgres://coder:${var.db_password}@${helm_release.pg_cluster.name}.coder.svc.cluster.local:5432/coder?sslmode=disable"
+      value: "postgres://coder:coder@${helm_release.pg_cluster.name}.coder.svc.cluster.local:5432/coder?sslmode=disable"
     - name: CODER_EXPERIMENTAL
       value: "true"
     EOT
