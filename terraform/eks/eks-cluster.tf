@@ -12,6 +12,15 @@ module "eks" {
 
   cluster_addons = {
 
+    coredns = {
+      most_recent = true
+    }
+    kube-proxy = {
+      most_recent = true
+    }
+    vpc-cni = {
+      most_recent = true
+    }
     aws-ebs-csi-driver = {
       most_recent = true
     }
@@ -22,6 +31,8 @@ module "eks" {
     ami_type = "AL2_x86_64"
 
     attach_cluster_primary_security_group = true
+
+    iam_role_additional_policies = { AmazonEBSCSIDriverPolicy = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy" }
 
     # Disabling and using externally provided security groups
     create_security_group = false
