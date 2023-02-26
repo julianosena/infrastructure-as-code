@@ -1,5 +1,7 @@
 terraform {
 
+  required_version = ">= 1.0"
+
   cloud {
     organization = "julianossc"
     workspaces {
@@ -7,17 +9,16 @@ terraform {
     }
   }
 
-  required_version = ">= 1.0"
-
   required_providers {
-    cloudinit = {
-      source  = "hashicorp/cloudinit"
-      version = "~> 2.2.0"
-    }
 
     aws = {
       source  = "hashicorp/aws"
       version = ">= 4.47"
+    }
+
+    cloudinit = {
+      source  = "hashicorp/cloudinit"
+      version = "~> 2.2.0"
     }
 
     random = {
@@ -27,7 +28,7 @@ terraform {
 
     tls = {
       source  = "hashicorp/tls"
-      version = "~> 4.0.4"
+      version = ">= 3.0"
     }
 
     kubernetes = {
