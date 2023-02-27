@@ -5,7 +5,7 @@ terraform {
   cloud {
     organization = "julianossc"
     workspaces {
-      name = "infrastructure"
+      name = "platform"
     }
   }
 
