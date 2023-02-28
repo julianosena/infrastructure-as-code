@@ -1,478 +1,566 @@
-provider "aws" {
-  region = local.region
-}
-
-provider "kubernetes" {
-  host                   = module.eks.cluster_endpoint
-  cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
-
-  exec {
-    api_version = "client.authentication.k8s.io/v1beta1"
-    command     = "aws"
-    # This requires the awscli to be installed locally where Terraform is executed
-    args = ["eks", "get-token", "--cluster-name", module.eks.cluster_name]
-  }
-}
-
-data "aws_availability_zones" "available" {}
+data "aws_partition" "current" {}
 data "aws_caller_identity" "current" {}
 
+data "aws_iam_session_context" "current" {
+  # This data source provides information on the IAM source role of an STS assumed role
+  # For non-role ARNs, this data source simply passes the ARN through issuer ARN
+  # Ref https://github.com/terraform-aws-modules/terraform-aws-eks/issues/2327#issuecomment-1355581682
+  # Ref https://github.com/hashicorp/terraform-provider-aws/issues/28381
+  arn = data.aws_caller_identity.current.arn
+}
+
 locals {
-  name   = "ex-${replace(basename(path.cwd), "_", "-")}"
-  region = "eu-west-1"
+  create = var.create && var.putin_khuylo
 
-  vpc_cidr = "10.0.0.0/16"
-  azs      = slice(data.aws_availability_zones.available.names, 0, 3)
+  cluster_role = try(aws_iam_role.this[0].arn, var.iam_role_arn)
 
-  tags = {
-    Example    = local.name
-    GithubRepo = "terraform-aws-eks"
-    GithubOrg  = "terraform-aws-modules"
-  }
+  create_outposts_local_cluster    = length(var.outpost_config) > 0
+  enable_cluster_encryption_config = length(var.cluster_encryption_config) > 0 && !local.create_outposts_local_cluster
 }
 
 ################################################################################
-# EKS Module
+# Cluster
 ################################################################################
 
-module "eks" {
-  source = "terraform-aws-modules/eks/aws"
-  version = "~> 19.0"
+resource "aws_eks_cluster" "this" {
+  count = local.create ? 1 : 0
 
-  cluster_name                   = local.name
-  cluster_endpoint_public_access = true
+  name                      = var.cluster_name
+  role_arn                  = local.cluster_role
+  version                   = var.cluster_version
+  enabled_cluster_log_types = var.cluster_enabled_log_types
 
-  cluster_addons = {
-    coredns = {
-      preserve    = true
-      most_recent = true
+  vpc_config {
+    security_group_ids      = compact(distinct(concat(var.cluster_additional_security_group_ids, [local.cluster_security_group_id])))
+    subnet_ids              = coalescelist(var.control_plane_subnet_ids, var.subnet_ids)
+    endpoint_private_access = var.cluster_endpoint_private_access
+    endpoint_public_access  = var.cluster_endpoint_public_access
+    public_access_cidrs     = var.cluster_endpoint_public_access_cidrs
+  }
 
-      timeouts = {
-        create = "25m"
-        delete = "10m"
+  dynamic "kubernetes_network_config" {
+    # Not valid on Outposts
+    for_each = local.create_outposts_local_cluster ? [] : [1]
+
+    content {
+      ip_family         = var.cluster_ip_family
+      service_ipv4_cidr = var.cluster_service_ipv4_cidr
+      service_ipv6_cidr = var.cluster_service_ipv6_cidr
+    }
+  }
+
+  dynamic "outpost_config" {
+    for_each = local.create_outposts_local_cluster ? [var.outpost_config] : []
+
+    content {
+      control_plane_instance_type = outpost_config.value.control_plane_instance_type
+      outpost_arns                = outpost_config.value.outpost_arns
+    }
+  }
+
+  dynamic "encryption_config" {
+    # Not available on Outposts
+    for_each = local.enable_cluster_encryption_config ? [var.cluster_encryption_config] : []
+
+    content {
+      provider {
+        key_arn = var.create_kms_key ? module.kms.key_arn : encryption_config.value.provider_key_arn
       }
-    }
-    kube-proxy = {
-      most_recent = true
-    }
-    vpc-cni = {
-      most_recent = true
-    }
-    aws-ebs-csi-driver = {
-      most_recent = true
+      resources = encryption_config.value.resources
     }
   }
 
-  # External encryption key
-  create_kms_key = false
-  cluster_encryption_config = {
-    resources        = ["secrets"]
-    provider_key_arn = module.kms.key_arn
+  tags = merge(
+    var.tags,
+    var.cluster_tags,
+  )
+
+  timeouts {
+    create = lookup(var.cluster_timeouts, "create", null)
+    update = lookup(var.cluster_timeouts, "update", null)
+    delete = lookup(var.cluster_timeouts, "delete", null)
   }
 
-  iam_role_additional_policies = {
-    additional = aws_iam_policy.additional.arn
+  depends_on = [
+    aws_iam_role_policy_attachment.this,
+    aws_security_group_rule.cluster,
+    aws_security_group_rule.node,
+    aws_cloudwatch_log_group.this,
+    aws_iam_policy.cni_ipv6_policy,
+  ]
+}
+
+resource "aws_ec2_tag" "cluster_primary_security_group" {
+  # This should not affect the name of the cluster primary security group
+  # Ref: https://github.com/terraform-aws-modules/terraform-aws-eks/pull/2006
+  # Ref: https://github.com/terraform-aws-modules/terraform-aws-eks/pull/2008
+  for_each = { for k, v in merge(var.tags, var.cluster_tags) :
+    k => v if local.create && k != "Name" && var.create_cluster_primary_security_group_tags && v != null
   }
 
-  vpc_id                   = module.vpc.vpc_id
-  subnet_ids               = module.vpc.private_subnets
-  control_plane_subnet_ids = module.vpc.intra_subnets
+  resource_id = aws_eks_cluster.this[0].vpc_config[0].cluster_security_group_id
+  key         = each.key
+  value       = each.value
+}
 
-  # Extend cluster security group rules
-  cluster_security_group_additional_rules = {
-    ingress_nodes_ephemeral_ports_tcp = {
-      description                = "Nodes on ephemeral ports"
+resource "aws_cloudwatch_log_group" "this" {
+  count = local.create && var.create_cloudwatch_log_group ? 1 : 0
+
+  name              = "/aws/eks/${var.cluster_name}/cluster"
+  retention_in_days = var.cloudwatch_log_group_retention_in_days
+  kms_key_id        = var.cloudwatch_log_group_kms_key_id
+
+  tags = var.tags
+}
+
+################################################################################
+# KMS Key
+################################################################################
+
+module "kms" {
+  source  = "terraform-aws-modules/kms/aws"
+  version = "1.1.0" # Note - be mindful of Terraform/provider version compatibility between modules
+
+  create = local.create && var.create_kms_key && local.enable_cluster_encryption_config # not valid on Outposts
+
+  description             = coalesce(var.kms_key_description, "${var.cluster_name} cluster encryption key")
+  key_usage               = "ENCRYPT_DECRYPT"
+  deletion_window_in_days = var.kms_key_deletion_window_in_days
+  enable_key_rotation     = var.enable_kms_key_rotation
+
+  # Policy
+  enable_default_policy     = var.kms_key_enable_default_policy
+  key_owners                = var.kms_key_owners
+  key_administrators        = coalescelist(var.kms_key_administrators, [data.aws_iam_session_context.current.issuer_arn])
+  key_users                 = concat([local.cluster_role], var.kms_key_users)
+  key_service_users         = var.kms_key_service_users
+  source_policy_documents   = var.kms_key_source_policy_documents
+  override_policy_documents = var.kms_key_override_policy_documents
+
+  # Aliases
+  aliases = var.kms_key_aliases
+  computed_aliases = {
+    # Computed since users can pass in computed values for cluster name such as random provider resources
+    cluster = { name = "eks/${var.cluster_name}" }
+  }
+
+  tags = var.tags
+}
+
+################################################################################
+# Cluster Security Group
+# Defaults follow https://docs.aws.amazon.com/eks/latest/userguide/sec-group-reqs.html
+################################################################################
+
+locals {
+  cluster_sg_name   = coalesce(var.cluster_security_group_name, "${var.cluster_name}-cluster")
+  create_cluster_sg = local.create && var.create_cluster_security_group
+
+  cluster_security_group_id = local.create_cluster_sg ? aws_security_group.cluster[0].id : var.cluster_security_group_id
+
+  # Do not add rules to node security group if the module is not creating it
+  cluster_security_group_rules = { for k, v in {
+    ingress_nodes_443 = {
+      description                = "Node groups to cluster API"
       protocol                   = "tcp"
-      from_port                  = 1025
-      to_port                    = 65535
+      from_port                  = 443
+      to_port                    = 443
       type                       = "ingress"
       source_node_security_group = true
     }
-    # Test: https://github.com/terraform-aws-modules/terraform-aws-eks/pull/2319
-    ingress_source_security_group_id = {
-      description              = "Ingress from another computed security group"
-      protocol                 = "tcp"
-      from_port                = 22
-      to_port                  = 22
-      type                     = "ingress"
-      source_security_group_id = aws_security_group.additional.id
-    }
+  } : k => v if local.create_node_sg }
+}
+
+resource "aws_security_group" "cluster" {
+  count = local.create_cluster_sg ? 1 : 0
+
+  name        = var.cluster_security_group_use_name_prefix ? null : local.cluster_sg_name
+  name_prefix = var.cluster_security_group_use_name_prefix ? "${local.cluster_sg_name}${var.prefix_separator}" : null
+  description = var.cluster_security_group_description
+  vpc_id      = var.vpc_id
+
+  tags = merge(
+    var.tags,
+    { "Name" = local.cluster_sg_name },
+    var.cluster_security_group_tags
+  )
+
+  lifecycle {
+    create_before_destroy = true
   }
+}
 
-  # Extend node-to-node security group rules
-  node_security_group_additional_rules = {
-    ingress_self_all = {
-      description = "Node to node all ports/protocols"
-      protocol    = "-1"
-      from_port   = 0
-      to_port     = 0
-      type        = "ingress"
-      self        = true
-    }
-    # Test: https://github.com/terraform-aws-modules/terraform-aws-eks/pull/2319
-    ingress_source_security_group_id = {
-      description              = "Ingress from another computed security group"
-      protocol                 = "tcp"
-      from_port                = 22
-      to_port                  = 22
-      type                     = "ingress"
-      source_security_group_id = aws_security_group.additional.id
-    }
-  }
+resource "aws_security_group_rule" "cluster" {
+  for_each = { for k, v in merge(
+    local.cluster_security_group_rules,
+    var.cluster_security_group_additional_rules
+  ) : k => v if local.create_cluster_sg }
 
-  # Self Managed Node Group(s)
-  self_managed_node_group_defaults = {
-    vpc_security_group_ids = [aws_security_group.additional.id]
-    iam_role_additional_policies = {
-      additional = aws_iam_policy.additional.arn
-    }
+  # Required
+  security_group_id = aws_security_group.cluster[0].id
+  protocol          = each.value.protocol
+  from_port         = each.value.from_port
+  to_port           = each.value.to_port
+  type              = each.value.type
 
-    instance_refresh = {
-      strategy = "Rolling"
-      preferences = {
-        min_healthy_percentage = 66
-      }
-    }
-  }
-
-  self_managed_node_groups = {
-    spot = {
-      instance_type = "m5.large"
-      instance_market_options = {
-        market_type = "spot"
-      }
-
-      pre_bootstrap_user_data = <<-EOT
-        echo "foo"
-        export FOO=bar
-      EOT
-
-      bootstrap_extra_args = "--kubelet-extra-args '--node-labels=node.kubernetes.io/lifecycle=spot'"
-
-      post_bootstrap_user_data = <<-EOT
-        cd /tmp
-        sudo yum install -y https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm
-        sudo systemctl enable amazon-ssm-agent
-        sudo systemctl start amazon-ssm-agent
-      EOT
-    }
-  }
-
-  # EKS Managed Node Group(s)
-  eks_managed_node_group_defaults = {
-    ami_type       = "AL2_x86_64"
-    instance_types = ["m6i.large", "m5.large", "m5n.large", "m5zn.large"]
-
-    attach_cluster_primary_security_group = true
-    vpc_security_group_ids                = [aws_security_group.additional.id]
-    iam_role_additional_policies = {
-      additional = aws_iam_policy.additional.arn
-    }
-  }
-
-  eks_managed_node_groups = {
-    blue = {}
-    green = {
-      min_size     = 1
-      max_size     = 10
-      desired_size = 1
-
-      instance_types = ["t3.large"]
-      capacity_type  = "SPOT"
-      labels = {
-        Environment = "test"
-        GithubRepo  = "terraform-aws-eks"
-        GithubOrg   = "terraform-aws-modules"
-      }
-
-      taints = {
-        dedicated = {
-          key    = "dedicated"
-          value  = "gpuGroup"
-          effect = "NO_SCHEDULE"
-        }
-      }
-
-      update_config = {
-        max_unavailable_percentage = 33 # or set `max_unavailable`
-      }
-
-      tags = {
-        ExtraTag = "example"
-      }
-    }
-  }
-
-  # Fargate Profile(s)
-  fargate_profiles = {
-    default = {
-      name = "default"
-      selectors = [
-        {
-          namespace = "kube-system"
-          labels = {
-            k8s-app = "kube-dns"
-          }
-        },
-        {
-          namespace = "default"
-        }
-      ]
-
-      tags = {
-        Owner = "test"
-      }
-
-      timeouts = {
-        create = "20m"
-        delete = "20m"
-      }
-    }
-  }
-
-  # Create a new cluster where both an identity provider and Fargate profile is created
-  # will result in conflicts since only one can take place at a time
-  # # OIDC Identity provider
-  # cluster_identity_providers = {
-  #   sts = {
-  #     client_id = "sts.amazonaws.com"
-  #   }
-  # }
-
-  # aws-auth configmap
-  manage_aws_auth_configmap = true
-
-  aws_auth_node_iam_role_arns_non_windows = [
-    module.eks_managed_node_group.iam_role_arn,
-    module.self_managed_node_group.iam_role_arn,
-  ]
-  aws_auth_fargate_profile_pod_execution_role_arns = [
-    module.fargate_profile.fargate_profile_pod_execution_role_arn
-  ]
-
-  aws_auth_roles = [
-    {
-      rolearn  = module.eks_managed_node_group.iam_role_arn
-      username = "system:node:{{EC2PrivateDNSName}}"
-      groups = [
-        "system:bootstrappers",
-        "system:nodes",
-      ]
-    },
-    {
-      rolearn  = module.self_managed_node_group.iam_role_arn
-      username = "system:node:{{EC2PrivateDNSName}}"
-      groups = [
-        "system:bootstrappers",
-        "system:nodes",
-      ]
-    },
-    {
-      rolearn  = module.fargate_profile.fargate_profile_pod_execution_role_arn
-      username = "system:node:{{SessionName}}"
-      groups = [
-        "system:bootstrappers",
-        "system:nodes",
-        "system:node-proxier",
-      ]
-    }
-  ]
-
-  aws_auth_users = [
-    {
-      userarn  = "arn:aws:iam::66666666666:user/user1"
-      username = "user1"
-      groups   = ["system:masters"]
-    },
-    {
-      userarn  = "arn:aws:iam::66666666666:user/user2"
-      username = "user2"
-      groups   = ["system:masters"]
-    },
-  ]
-
-  aws_auth_accounts = [
-    "777777777777",
-    "888888888888",
-  ]
-
-  tags = local.tags
+  # Optional
+  description              = lookup(each.value, "description", null)
+  cidr_blocks              = lookup(each.value, "cidr_blocks", null)
+  ipv6_cidr_blocks         = lookup(each.value, "ipv6_cidr_blocks", null)
+  prefix_list_ids          = lookup(each.value, "prefix_list_ids", null)
+  self                     = lookup(each.value, "self", null)
+  source_security_group_id = try(each.value.source_node_security_group, false) ? local.node_security_group_id : lookup(each.value, "source_security_group_id", null)
 }
 
 ################################################################################
-# Sub-Module Usage on Existing/Separate Cluster
+# IRSA
+# Note - this is different from EKS identity provider
 ################################################################################
 
-module "eks_managed_node_group" {
-  source = "terraform-aws-modules/eks/aws//modules/eks-managed-node-group"
+data "tls_certificate" "this" {
+  # Not available on outposts
+  count = local.create && var.enable_irsa && !local.create_outposts_local_cluster ? 1 : 0
 
-  name            = "separate-eks-mng"
-  cluster_name    = module.eks.cluster_name
-  cluster_version = module.eks.cluster_version
-
-  subnet_ids                        = module.vpc.private_subnets
-  cluster_primary_security_group_id = module.eks.cluster_primary_security_group_id
-  vpc_security_group_ids = [
-    module.eks.cluster_security_group_id,
-  ]
-
-  ami_type = "BOTTLEROCKET_x86_64"
-  platform = "bottlerocket"
-
-  # this will get added to what AWS provides
-  bootstrap_extra_args = <<-EOT
-    # extra args added
-    [settings.kernel]
-    lockdown = "integrity"
-
-    [settings.kubernetes.node-labels]
-    "label1" = "foo"
-    "label2" = "bar"
-  EOT
-
-  tags = merge(local.tags, { Separate = "eks-managed-node-group" })
+  url = aws_eks_cluster.this[0].identity[0].oidc[0].issuer
 }
 
-module "self_managed_node_group" {
-  source = "terraform-aws-modules/eks/aws//modules/self-managed-node-group"
+resource "aws_iam_openid_connect_provider" "oidc_provider" {
+  # Not available on outposts
+  count = local.create && var.enable_irsa && !local.create_outposts_local_cluster ? 1 : 0
 
-  name                = "separate-self-mng"
-  cluster_name        = module.eks.cluster_name
-  cluster_version     = module.eks.cluster_version
-  cluster_endpoint    = module.eks.cluster_endpoint
-  cluster_auth_base64 = module.eks.cluster_certificate_authority_data
+  client_id_list  = distinct(compact(concat(["sts.${local.dns_suffix}"], var.openid_connect_audiences)))
+  thumbprint_list = concat(data.tls_certificate.this[0].certificates[*].sha1_fingerprint, var.custom_oidc_thumbprints)
+  url             = aws_eks_cluster.this[0].identity[0].oidc[0].issuer
 
-  instance_type = "m5.large"
-
-  subnet_ids = module.vpc.private_subnets
-  vpc_security_group_ids = [
-    module.eks.cluster_primary_security_group_id,
-    module.eks.cluster_security_group_id,
-  ]
-
-  tags = merge(local.tags, { Separate = "self-managed-node-group" })
-}
-
-module "fargate_profile" {
-  source = "terraform-aws-modules/eks/aws//modules/fargate-profile"
-
-  name         = "separate-fargate-profile"
-  cluster_name = module.eks.cluster_name
-
-  subnet_ids = module.vpc.private_subnets
-  selectors = [{
-    namespace = "kube-system"
-  }]
-
-  tags = merge(local.tags, { Separate = "fargate-profile" })
+  tags = merge(
+    { Name = "${var.cluster_name}-eks-irsa" },
+    var.tags
+  )
 }
 
 ################################################################################
-# Disabled creation
+# IAM Role
 ################################################################################
 
-module "disabled_eks" {
-  source = "./"
+locals {
+  create_iam_role        = local.create && var.create_iam_role
+  iam_role_name          = coalesce(var.iam_role_name, "${var.cluster_name}-cluster")
+  iam_role_policy_prefix = "arn:${data.aws_partition.current.partition}:iam::aws:policy"
 
-  create = false
+  cluster_encryption_policy_name = coalesce(var.cluster_encryption_policy_name, "${local.iam_role_name}-ClusterEncryption")
+
+  # TODO - hopefully this can be removed once the AWS endpoint is named properly in China
+  # https://github.com/terraform-aws-modules/terraform-aws-eks/issues/1904
+  dns_suffix = coalesce(var.cluster_iam_role_dns_suffix, data.aws_partition.current.dns_suffix)
 }
 
-module "disabled_fargate_profile" {
-  source = "terraform-aws-modules/eks/aws//modules/fargate-profile"
+data "aws_iam_policy_document" "assume_role_policy" {
+  count = local.create && var.create_iam_role ? 1 : 0
 
-  create = false
+  statement {
+    sid     = "EKSClusterAssumeRole"
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["eks.${local.dns_suffix}"]
+    }
+
+    dynamic "principals" {
+      for_each = local.create_outposts_local_cluster ? [1] : []
+
+      content {
+        type = "Service"
+        identifiers = [
+          "ec2.${local.dns_suffix}",
+        ]
+      }
+    }
+  }
 }
 
-module "disabled_eks_managed_node_group" {
-  source = "terraform-aws-modules/eks/aws//modules/eks-managed-node-group"
+resource "aws_iam_role" "this" {
+  count = local.create_iam_role ? 1 : 0
 
-  create = false
-}
+  name        = var.iam_role_use_name_prefix ? null : local.iam_role_name
+  name_prefix = var.iam_role_use_name_prefix ? "${local.iam_role_name}${var.prefix_separator}" : null
+  path        = var.iam_role_path
+  description = var.iam_role_description
 
-module "disabled_self_managed_node_group" {
-  source = "terraform-aws-modules/eks/aws//modules/self-managed-node-group"
+  assume_role_policy    = data.aws_iam_policy_document.assume_role_policy[0].json
+  permissions_boundary  = var.iam_role_permissions_boundary
+  force_detach_policies = true
 
-  create = false
-}
+  # https://github.com/terraform-aws-modules/terraform-aws-eks/issues/920
+  # Resources running on the cluster are still generating logs when destroying the module resources
+  # which results in the log group being re-created even after Terraform destroys it. Removing the
+  # ability for the cluster role to create the log group prevents this log group from being re-created
+  # outside of Terraform due to services still generating logs during destroy process
+  dynamic "inline_policy" {
+    for_each = var.create_cloudwatch_log_group ? [1] : []
+    content {
+      name = local.iam_role_name
 
-################################################################################
-# Supporting resources
-################################################################################
-
-module "vpc" {
-  source  = "terraform-aws-modules/vpc/aws"
-  version = "~> 3.0"
-
-  name = local.name
-  cidr = local.vpc_cidr
-
-  azs             = local.azs
-  private_subnets = [for k, v in local.azs : cidrsubnet(local.vpc_cidr, 4, k)]
-  public_subnets  = [for k, v in local.azs : cidrsubnet(local.vpc_cidr, 8, k + 48)]
-  intra_subnets   = [for k, v in local.azs : cidrsubnet(local.vpc_cidr, 8, k + 52)]
-
-  enable_nat_gateway   = true
-  single_nat_gateway   = true
-  enable_dns_hostnames = true
-
-  enable_flow_log                      = true
-  create_flow_log_cloudwatch_iam_role  = true
-  create_flow_log_cloudwatch_log_group = true
-
-  public_subnet_tags = {
-    "kubernetes.io/role/elb" = 1
+      policy = jsonencode({
+        Version = "2012-10-17"
+        Statement = [
+          {
+            Action   = ["logs:CreateLogGroup"]
+            Effect   = "Deny"
+            Resource = "*"
+          },
+        ]
+      })
+    }
   }
 
-  private_subnet_tags = {
-    "kubernetes.io/role/internal-elb" = 1
-  }
-
-  tags = local.tags
+  tags = merge(var.tags, var.iam_role_tags)
 }
 
-resource "aws_security_group" "additional" {
-  name_prefix = "${local.name}-additional"
-  vpc_id      = module.vpc.vpc_id
+# Policies attached ref https://docs.aws.amazon.com/eks/latest/userguide/service_IAM_role.html
+resource "aws_iam_role_policy_attachment" "this" {
+  for_each = { for k, v in {
+    AmazonEKSClusterPolicy         = local.create_outposts_local_cluster ? "${local.iam_role_policy_prefix}/AmazonEKSLocalOutpostClusterPolicy" : "${local.iam_role_policy_prefix}/AmazonEKSClusterPolicy",
+    AmazonEKSVPCResourceController = "${local.iam_role_policy_prefix}/AmazonEKSVPCResourceController",
+  } : k => v if local.create_iam_role }
 
-  ingress {
-    from_port = 22
-    to_port   = 22
-    protocol  = "tcp"
-    cidr_blocks = [
-      "10.0.0.0/8",
-      "172.16.0.0/12",
-      "192.168.0.0/16",
-    ]
-  }
-
-  tags = merge(local.tags, { Name = "${local.name}-additional" })
+  policy_arn = each.value
+  role       = aws_iam_role.this[0].name
 }
 
-resource "aws_iam_policy" "additional" {
-  name = "${local.name}-additional"
+resource "aws_iam_role_policy_attachment" "additional" {
+  for_each = { for k, v in var.iam_role_additional_policies : k => v if local.create_iam_role }
+
+  policy_arn = each.value
+  role       = aws_iam_role.this[0].name
+}
+
+# Using separate attachment due to `The "for_each" value depends on resource attributes that cannot be determined until apply`
+resource "aws_iam_role_policy_attachment" "cluster_encryption" {
+  # Encryption config not available on Outposts
+  count = local.create_iam_role && var.attach_cluster_encryption_policy && local.enable_cluster_encryption_config ? 1 : 0
+
+  policy_arn = aws_iam_policy.cluster_encryption[0].arn
+  role       = aws_iam_role.this[0].name
+}
+
+resource "aws_iam_policy" "cluster_encryption" {
+  # Encryption config not available on Outposts
+  count = local.create_iam_role && var.attach_cluster_encryption_policy && local.enable_cluster_encryption_config ? 1 : 0
+
+  name        = var.cluster_encryption_policy_use_name_prefix ? null : local.cluster_encryption_policy_name
+  name_prefix = var.cluster_encryption_policy_use_name_prefix ? local.cluster_encryption_policy_name : null
+  description = var.cluster_encryption_policy_description
+  path        = var.cluster_encryption_policy_path
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
         Action = [
-          "ec2:Describe*",
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ListGrants",
+          "kms:DescribeKey",
         ]
         Effect   = "Allow"
-        Resource = "*"
+        Resource = var.create_kms_key ? module.kms.key_arn : var.cluster_encryption_config.provider_key_arn
       },
     ]
   })
+
+  tags = merge(var.tags, var.cluster_encryption_policy_tags)
 }
 
-module "kms" {
-  source  = "terraform-aws-modules/kms/aws"
-  version = "1.1.0"
+################################################################################
+# EKS Addons
+################################################################################
 
-  aliases               = ["eks/${local.name}"]
-  description           = "${local.name} cluster encryption key"
-  enable_default_policy = true
-  key_owners            = [data.aws_caller_identity.current.arn]
+resource "aws_eks_addon" "this" {
+  # Not supported on outposts
+  for_each = { for k, v in var.cluster_addons : k => v if !try(v.before_compute, false) && local.create && !local.create_outposts_local_cluster }
 
-  tags = local.tags
+  cluster_name = aws_eks_cluster.this[0].name
+  addon_name   = try(each.value.name, each.key)
+
+  addon_version            = try(each.value.addon_version, data.aws_eks_addon_version.this[each.key].version)
+  configuration_values     = try(each.value.configuration_values, null)
+  preserve                 = try(each.value.preserve, null)
+  resolve_conflicts        = try(each.value.resolve_conflicts, "OVERWRITE")
+  service_account_role_arn = try(each.value.service_account_role_arn, null)
+
+  timeouts {
+    create = try(each.value.timeouts.create, var.cluster_addons_timeouts.create, null)
+    update = try(each.value.timeouts.update, var.cluster_addons_timeouts.update, null)
+    delete = try(each.value.timeouts.delete, var.cluster_addons_timeouts.delete, null)
+  }
+
+  depends_on = [
+    module.fargate_profile,
+    module.eks_managed_node_group,
+    module.self_managed_node_group,
+  ]
+
+  tags = var.tags
+}
+
+resource "aws_eks_addon" "before_compute" {
+  # Not supported on outposts
+  for_each = { for k, v in var.cluster_addons : k => v if try(v.before_compute, false) && local.create && !local.create_outposts_local_cluster }
+
+  cluster_name = aws_eks_cluster.this[0].name
+  addon_name   = try(each.value.name, each.key)
+
+  addon_version            = try(each.value.addon_version, data.aws_eks_addon_version.this[each.key].version)
+  configuration_values     = try(each.value.configuration_values, null)
+  preserve                 = try(each.value.preserve, null)
+  resolve_conflicts        = try(each.value.resolve_conflicts, "OVERWRITE")
+  service_account_role_arn = try(each.value.service_account_role_arn, null)
+
+  timeouts {
+    create = try(each.value.timeouts.create, var.cluster_addons_timeouts.create, null)
+    update = try(each.value.timeouts.update, var.cluster_addons_timeouts.update, null)
+    delete = try(each.value.timeouts.delete, var.cluster_addons_timeouts.delete, null)
+  }
+
+  tags = var.tags
+}
+
+data "aws_eks_addon_version" "this" {
+  for_each = { for k, v in var.cluster_addons : k => v if local.create && !local.create_outposts_local_cluster }
+
+  addon_name         = try(each.value.name, each.key)
+  kubernetes_version = coalesce(var.cluster_version, aws_eks_cluster.this[0].version)
+  most_recent        = try(each.value.most_recent, null)
+}
+
+################################################################################
+# EKS Identity Provider
+# Note - this is different from IRSA
+################################################################################
+
+resource "aws_eks_identity_provider_config" "this" {
+  for_each = { for k, v in var.cluster_identity_providers : k => v if local.create && !local.create_outposts_local_cluster }
+
+  cluster_name = aws_eks_cluster.this[0].name
+
+  oidc {
+    client_id                     = each.value.client_id
+    groups_claim                  = lookup(each.value, "groups_claim", null)
+    groups_prefix                 = lookup(each.value, "groups_prefix", null)
+    identity_provider_config_name = try(each.value.identity_provider_config_name, each.key)
+    issuer_url                    = try(each.value.issuer_url, aws_eks_cluster.this[0].identity[0].oidc[0].issuer)
+    required_claims               = lookup(each.value, "required_claims", null)
+    username_claim                = lookup(each.value, "username_claim", null)
+    username_prefix               = lookup(each.value, "username_prefix", null)
+  }
+
+  tags = var.tags
+}
+
+################################################################################
+# aws-auth configmap
+################################################################################
+
+locals {
+  node_iam_role_arns_non_windows = distinct(
+    compact(
+      concat(
+        [for group in module.eks_managed_node_group : group.iam_role_arn],
+        [for group in module.self_managed_node_group : group.iam_role_arn if group.platform != "windows"],
+        var.aws_auth_node_iam_role_arns_non_windows,
+      )
+    )
+  )
+
+  node_iam_role_arns_windows = distinct(
+    compact(
+      concat(
+        [for group in module.self_managed_node_group : group.iam_role_arn if group.platform == "windows"],
+        var.aws_auth_node_iam_role_arns_windows,
+      )
+    )
+  )
+
+  fargate_profile_pod_execution_role_arns = distinct(
+    compact(
+      concat(
+        [for group in module.fargate_profile : group.fargate_profile_pod_execution_role_arn],
+        var.aws_auth_fargate_profile_pod_execution_role_arns,
+      )
+    )
+  )
+
+  aws_auth_configmap_data = {
+    mapRoles = yamlencode(concat(
+      [for role_arn in local.node_iam_role_arns_non_windows : {
+        rolearn  = role_arn
+        username = "system:node:{{EC2PrivateDNSName}}"
+        groups = [
+          "system:bootstrappers",
+          "system:nodes",
+        ]
+        }
+      ],
+      [for role_arn in local.node_iam_role_arns_windows : {
+        rolearn  = role_arn
+        username = "system:node:{{EC2PrivateDNSName}}"
+        groups = [
+          "eks:kube-proxy-windows",
+          "system:bootstrappers",
+          "system:nodes",
+        ]
+        }
+      ],
+      # Fargate profile
+      [for role_arn in local.fargate_profile_pod_execution_role_arns : {
+        rolearn  = role_arn
+        username = "system:node:{{SessionName}}"
+        groups = [
+          "system:bootstrappers",
+          "system:nodes",
+          "system:node-proxier",
+        ]
+        }
+      ],
+      var.aws_auth_roles
+    ))
+    mapUsers    = yamlencode(var.aws_auth_users)
+    mapAccounts = yamlencode(var.aws_auth_accounts)
+  }
+}
+
+resource "kubernetes_config_map" "aws_auth" {
+  count = var.create && var.create_aws_auth_configmap ? 1 : 0
+
+  metadata {
+    name      = "aws-auth"
+    namespace = "kube-system"
+  }
+
+  data = local.aws_auth_configmap_data
+
+  lifecycle {
+    # We are ignoring the data here since we will manage it with the resource below
+    # This is only intended to be used in scenarios where the configmap does not exist
+    ignore_changes = [data, metadata[0].labels, metadata[0].annotations]
+  }
+}
+
+resource "kubernetes_config_map_v1_data" "aws_auth" {
+  count = var.create && var.manage_aws_auth_configmap ? 1 : 0
+
+  force = true
+
+  metadata {
+    name      = "aws-auth"
+    namespace = "kube-system"
+  }
+
+  data = local.aws_auth_configmap_data
+
+  depends_on = [
+    # Required for instances where the configmap does not exist yet to avoid race condition
+    kubernetes_config_map.aws_auth,
+  ]
 }
