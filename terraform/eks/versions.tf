@@ -13,7 +13,12 @@ terraform {
 
     aws = {
       source  = "hashicorp/aws"
-      version = ">= 4.47"
+      version = ">= 4.56"
+    }
+
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = ">= 2.10"
     }
 
     cloudinit = {
@@ -29,11 +34,6 @@ terraform {
     tls = {
       source  = "hashicorp/tls"
       version = ">= 3.0"
-    }
-
-    kubernetes = {
-      source  = "hashicorp/kubernetes"
-      version = ">= 2.10"
     }
 
     time = {
