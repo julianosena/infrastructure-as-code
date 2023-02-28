@@ -372,7 +372,7 @@ module "fargate_profile" {
 ################################################################################
 
 module "disabled_eks" {
-  source = "../.."
+  source = "./"
 
   create = false
 }
