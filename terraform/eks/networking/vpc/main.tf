@@ -10,12 +10,23 @@ module "vpc" {
     public_subnets  = [for k, v in var.azs : cidrsubnet(var.vpc_cidr, 8, k + 48)]
     intra_subnets   = [for k, v in var.azs : cidrsubnet(var.vpc_cidr, 8, k + 52)]
 
-    enable_nat_gateway  = var.enable_nat_gateway
-    single_nat_gateway  = var.single_nat_gateway
-    reuse_nat_ips       = var.reuse_nat_ips
-    enable_vpn_gateway  = var.enable_vpn_gateway
+    enable_nat_gateway    = var.enable_nat_gateway
+    single_nat_gateway    = var.single_nat_gateway
+    reuse_nat_ips         = var.reuse_nat_ips
+    enable_vpn_gateway    = var.enable_vpn_gateway
+    enable_dns_hostnames  = var.enable_dns_hostnames
 
-    external_nat_ip_ids = "${aws_eip.nat.*.id}"
+    external_nat_ip_ids   = "${aws_eip.nat.*.id}"
+
+    public_subnet_tags = {
+      "kubernetes.io/cluster/${var.cluster.name}"   = "shared"
+      "kubernetes.io/role/elb"                      = 1
+    }
+
+    private_subnet_tags = {
+      "kubernetes.io/cluster/${var.cluster.name}"   = "shared"
+      "kubernetes.io/role/internal-elb"             = 1
+    }
 
     enable_flow_log                      = var.enable_flow_log
     create_flow_log_cloudwatch_iam_role  = var.create_flow_log_cloudwatch_iam_role

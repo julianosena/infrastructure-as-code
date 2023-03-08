@@ -1,3 +1,7 @@
+variable "cluster" {
+    type = map(string)
+}
+
 variable "azs" {
     type = list(string)
 }
@@ -27,10 +31,16 @@ variable "enable_vpn_gateway" {
     default = true
 }
 
+variable "enable_dns_hostnames" {
+    type    = bool
+    default = true
+}
+
 variable "enable_flow_log" {
     type    = bool
     default = true
 }
+
 
 variable "create_flow_log_cloudwatch_iam_role" {
     type    = bool
