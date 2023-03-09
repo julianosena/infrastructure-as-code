@@ -1,88 +1,82 @@
-data "aws_availability_zones" "available" {}
-
 provider "aws" {
   region  = var.aws.region
 }
 
 locals {
-  cluster_name = "eks-${random_string.default.result}"
+    # Cluster
+    cluster_name  = "eks-${var.project.name}"
+
+    tags = {
+      environment   = "production"
+    }
 }
 
-module "vpc" {
-  source = "./networking/vpc"
 
-  vpc_cidr  = "10.0.0.0/16"
-  azs       = slice(data.aws_availability_zones.available.names, 0, 3)
-  cluster   = {
-    name = local.cluster_name
+## EKS Cluster
+resource "aws_eks_cluster" "eks_cluster" {
+  name      = local.cluster_name
+  role_arn  = aws_iam_role.eks_cluster.arn
+
+  vpc_config {
+    subnet_ids          = aws_subnet.private.*.id
+    security_group_ids  = [aws_security_group.eks_cluster.id]
   }
 
-  tags  = {
-    project = var.project.name
-  }
+  depends_on = [aws_iam_role_policy_attachment.eks_cluster]
+
+  tags = local.tags
 }
 
-module "eks" {
-  source = "terraform-aws-modules/eks/aws"
-  version = "~> 19.0"
+# Define the IAM role for the EKS cluster
+resource "aws_iam_role" "eks_cluster" {
+  name = "iam-role-${local.cluster_name}"
 
-  cluster_name                    = local.cluster_name
-  cluster_version                 = "1.24"
-
-  cluster_endpoint_public_access  = true
-
-  cluster_addons = {
-
-    coredns = {
-      preserve    = true
-      most_recent = true
-
-      timeouts = {
-        create = "25m"
-        delete = "10m"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "eks.amazonaws.com"
+        }
       }
-    }
-
-    kube-proxy = {
-      most_recent = true
-    }
-
-    vpc-cni = {
-      most_recent = true
-    }
-
-    aws_eks_addon = {
-      most_recent = true
-    }
-  }
-
-  vpc_id                    = module.vpc.vpc_id
-  subnet_ids                = module.vpc.private_subnets
-  control_plane_subnet_ids  = module.vpc.intra_subnets
-
-  eks_managed_node_groups = {
-    one = {
-      name = "node-group-1"
-
-      instance_types = ["t3.small"]
-
-      min_size     = 1
-      max_size     = 3
-      desired_size = 2
-    }
-
-    two = {
-      name = "node-group-2"
-
-      instance_types = ["t3.small"]
-
-      min_size     = 1
-      max_size     = 2
-      desired_size = 1
-    }
-  }
+    ]
+  })
 }
 
-resource "random_string" "default" {
-  length = 16
+# Attach the IAM policy to the IAM role
+resource "aws_iam_role_policy_attachment" "eks_cluster" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+  role = aws_iam_role.eks_cluster.name
+}
+
+# Define the VPC and subnets
+resource "aws_vpc" "vpc" {
+  cidr_block = "10.0.0.0/16"
+
+  tags = local.tags
+}
+
+resource "aws_subnet" "private" {
+  count = 2
+  cidr_block = "10.0.${count.index + 1}.0/24"
+  vpc_id = aws_vpc.vpc.id
+
+  tags = local.tags
+}
+
+# Define the security group for the EKS cluster
+resource "aws_security_group" "eks_cluster" {
+  name_prefix = "eks-cluster-"
+  vpc_id = aws_vpc.vpc.id
+
+  ingress {
+    from_port = 443
+    to_port = 443
+    protocol = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = local.tags
 }
