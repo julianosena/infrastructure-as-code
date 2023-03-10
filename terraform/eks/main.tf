@@ -30,9 +30,21 @@ module "eks" {
 
   # EKS Addons
   cluster_addons = {
-    coredns    = {}
-    kube-proxy = {}
-    vpc-cni    = {}
+    coredns             = {
+      most_recent = true
+    }
+
+    kube-proxy          = {
+      most_recent = true
+    }
+
+    vpc-cni             = {
+      most_recent = true
+    }
+
+    aws-ebs-csi-driver  = {
+      most_recent = true
+    }
   }
 
   vpc_id     = module.vpc.vpc_id
