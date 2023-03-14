@@ -5,3 +5,8 @@
 ```
 aws eks describe-addon-versions > addons.json
 ```
+
+### Config your kubectl to your cluster
+```
+aws eks --region <REGION> update-kubeconfig --name <CLUSTER NAME>
+```
