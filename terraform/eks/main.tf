@@ -3,7 +3,7 @@ provider "aws" {
 }
 
 locals {
-  name                  = var.project.name
+  project_name          = var.project.name
   region                = var.cloud.region
   namespace             = var.project.namespace
 

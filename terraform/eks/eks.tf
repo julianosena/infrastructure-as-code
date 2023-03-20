@@ -1,12 +1,12 @@
 provider "kubernetes" {
   host                   = module.eks.cluster_endpoint
-  token                  = data.aws_eks_cluster_auth.this.token
   cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
 
   exec {
     api_version = "client.authentication.k8s.io/v1beta1"
-    args        = ["eks", "get-token", "--cluster-name", module.eks.cluster_name]
     command     = "aws"
+    # This requires the awscli to be installed locally where Terraform is executed
+    args = ["eks", "get-token", "--cluster-name", module.eks.cluster_name]
   }
 }
 
@@ -14,9 +14,9 @@ module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "~> 19.9"
 
-  cluster_name                   = local.cluster.name
-  cluster_version                = "1.25"
-  cluster_endpoint_public_access = true
+  cluster_name                    = local.cluster.name
+  cluster_version                 = "1.25"
+  cluster_endpoint_public_access  = true
 
   # EKS Addons
   cluster_addons = {
@@ -34,6 +34,7 @@ module "eks" {
 
     aws-ebs-csi-driver  = {
       most_recent = true
+      enable_amazon_eks_aws_ebs_csi_driver = true
     }
   }
 
@@ -53,6 +54,11 @@ module "eks" {
   tags = local.cluster.tags
 }
 
+# Create AWS Secrets Manager secret
+resource "aws_secretsmanager_secret" "aws_secret_manager" {
+  name = "aws_secret_manager_${local.project_name}"
+}
+
 resource "kubernetes_secret" "secrets" {
   metadata {
     name = local.cluster.service_account_name
@@ -70,7 +76,7 @@ resource "kubernetes_service_account" "service_account" {
 }
 
 resource "aws_iam_role" "role_services" {
-  name = "role_services_${local.name}"
+  name = "RoleServices"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -87,7 +93,7 @@ resource "aws_iam_role" "role_services" {
 }
 
 resource "aws_iam_policy" "policy_services_reading_secrets" {
-  name        = "policy_services_reading_secrets_${local.name}"
+  name        = "ServicesReadingSecrets"
   policy      = jsonencode({
     Version = "2012-10-17"
     Statement = [
