@@ -1,0 +1,21 @@
+kind: Pod
+apiVersion: v1
+metadata:
+  name: nginx-secrets-store-inline
+  namespace: default
+spec:
+  serviceAccountName: ccb-report-service-account
+  containers:
+  - image: nginx
+    name: nginx
+    volumeMounts:
+    - name: secrets
+      mountPath: "/mnt/secrets-store"
+      readOnly: true
+  volumes:
+    - name: secrets
+      csi:
+        driver: secrets-store.csi.k8s.io
+        readOnly: true
+        volumeAttributes:
+          secretProviderClass: "aws-secrets"

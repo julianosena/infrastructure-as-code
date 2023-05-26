@@ -1,0 +1,32 @@
+apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority-data: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUMvakNDQWVhZ0F3SUJBZ0lCQURBTkJna3Foa2lHOXcwQkFRc0ZBREFWTVJNd0VRWURWUVFERXdwcmRXSmwKY201bGRHVnpNQjRYRFRJek1EVXlOVEUzTVRFeU0xb1hEVE16TURVeU1qRTNNVEV5TTFvd0ZURVRNQkVHQTFVRQpBeE1LYTNWaVpYSnVaWFJsY3pDQ0FTSXdEUVlKS29aSWh2Y05BUUVCQlFBRGdnRVBBRENDQVFvQ2dnRUJBTTJtCnFBczQ1OThERnp3SGV6Mmljci9CVE9DaGI1NjZwaTYwZXNTd2haMXJEWVRxdTBGT2l1UmNwbHVQWWxrUUZCajIKK2tiZlZHbnlxRTQxdDJRa0tuSEZOWmVKVVF0OHdJQ1JXK1JBYkNzS21JRFo2dWhZNjBVa29LbnkvRlJNazVlSApqUE4zUmxyTWJ0cE15Rit6Y214TmdoZ1Yvb1R6WlZCNkp0U0RqQWZNbzZ4cnZ2ZnRXc3YwOEI4bE9BM0xwdnpoCnlzelVQRUZ5WFIzZG13eERaWXdCbVRGMkxpUHJ5cmI4eTgxaFo3ZlY5enc0UFMyOEszcFZFaThRVm1wbllVbXIKY1NCYWR0S2JpMmdYb0cwZ1ZtMnVJMk43MGsxNnE2YVp3ODN6c2o4US9WZXNiaWV2WUZpb1ZiNTlYME1tRjFLdApCMFh0bnhHN3huUnNwcUFERVJFQ0F3RUFBYU5aTUZjd0RnWURWUjBQQVFIL0JBUURBZ0trTUE4R0ExVWRFd0VCCi93UUZNQU1CQWY4d0hRWURWUjBPQkJZRUZIWXBQOC83OFB3NXMrQlM2T3ArQUNocUZ6MUlNQlVHQTFVZEVRUU8KTUF5Q0NtdDFZbVZ5Ym1WMFpYTXdEUVlKS29aSWh2Y05BUUVMQlFBRGdnRUJBRDJCVEViZ1kxcDhFdVNPVkVqMAorYSt1WTBGdGJ0WHRrTEkwM0JOTEs2L2tFRzNrZDRLNHNqeTFVUWNpeUppVC9ZZ0FWWWdxRit3bXZTSXZvcXdjCmpiazdlN0lyYVdqdWtlbkg4bUYwekltOXV0eVZrUSt0dDk2bHNMdDVJWUJkL1RYcGp4MTRUSENvRlV4Tm1HUXAKR3lEOEViSjRNZkJQK3YrUk5kaHZNUHNJeEpHTXAwN3JuMVBLT2VXWmZwK3dQUUVVRU5Xa3h0clhiSDdLUElsVgozRWkyUDNxMEtMREJLZmRVTVVpUW1CZTQ3TjkreWJ4OGJGUEVmTjJmb0FXNm1sSnBCb25XOHJpOHhNUlNSZndsCnRBT3psajRmOWFLM2JKbUYvT1pkMXNKdUxZay9JL1JzVmtlRFh1MHRXYk1iclRXc2wvZjFOOGpkdWxRa1ZEdDMKNlNvPQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==
+    server: https://9187EBCCCFC85884716B4460FEEE5F2A.gr7.eu-west-1.eks.amazonaws.com
+  name: ccb-report.eu-west-1.eksctl.io
+contexts:
+- context:
+    cluster: ccb-report.eu-west-1.eksctl.io
+    user: terraform@ccb-report.eu-west-1.eksctl.io
+  name: terraform@ccb-report.eu-west-1.eksctl.io
+current-context: terraform@ccb-report.eu-west-1.eksctl.io
+kind: Config
+preferences: {}
+users:
+- name: terraform@ccb-report.eu-west-1.eksctl.io
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      args:
+      - token
+      - -i
+      - ccb-report
+      command: aws-iam-authenticator
+      env:
+      - name: AWS_STS_REGIONAL_ENDPOINTS
+        value: regional
+      - name: AWS_DEFAULT_REGION
+        value: eu-west-1
+      - name: AWS_PROFILE
+        value: terraform
+      provideClusterInfo: false

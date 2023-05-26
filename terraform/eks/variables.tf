@@ -8,15 +8,22 @@ variable "cloud" {
 variable "project" {
   type = map(string)
   default = {
-    name      = "ccb-report-online"
-    namespace = "ccb-report-online"
+    name      = "ccb-report"
+    namespace = "ccb-report"
+  }
+}
+
+variable "eks" {
+  type = map(string)
+  default = {
+    cluster_name = "ccb-report"
   }
 }
 
 variable "required_tags" {
   type = map(string)
   default = {
-    Project     = "ccb-report-online"
+    Project     = "ccb-report"
     Environment = "production"
   }
 }
